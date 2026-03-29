@@ -1,5 +1,5 @@
 """
-ICT Trading Bot — Scalp Edition
+ICT Trading Bot - Scalp Edition
 Exchange : Kraken Futures (krakenfutures via CCXT)
 Pairs    : BTC/USD:USD  |  ETH/USD:USD
 Timeframe: 1m candles  |  15m sweeps  |  1H trend
@@ -61,13 +61,14 @@ def calc_ema(series, n):
 
 
 def calc_vwap(df):
+    """VWAP berekening compatible met Python 3.13 / Pandas 2.x"""
     df = df.copy()
-    df["date"]   = df["ts"].dt.date
-    df["hlc3"]   = (df["high"] + df["low"] + df["close"]) / 3
-    df["cvol"]   = df.groupby("date")["volume"].cumsum()
-    df["ctpvol"] = df.groupby("date").apply(
-        lambda g: (g["hlc3"] * g["volume"]).cumsum()
-    ).reset_index(level=0, drop=True)
+    df["date"] = df["ts"].dt.date
+    df["hlc3"] = (df["high"] + df["low"] + df["close"]) / 3
+    df["tpvol"] = df["hlc3"] * df["volume"]
+    # Gebruik transform ipv apply om MultiIndex problemen te voorkomen
+    df["cvol"]   = df.groupby("date")["volume"].transform("cumsum")
+    df["ctpvol"] = df.groupby("date")["tpvol"].transform("cumsum")
     return df["ctpvol"] / df["cvol"]
 
 
@@ -286,4 +287,3 @@ if __name__ == "__main__":
     while True:
         schedule.run_pending()
         time.sleep(10)
-bot.py
