@@ -29,7 +29,6 @@ RISK_PERCENT    = 1.0
 MIN_RR          = 3.0
 TP_RR           = 3.0
 SL_BUFFER_PCT   = 0.1
-FVG_MIN_PCT     = 0.05
 SWING_LOOKBACK  = 10
 H1_EMA_LEN      = 50
 MSS_LOOKBACK    = 20
@@ -134,18 +133,18 @@ def check_setup(symbol):
     bull_mss_seen = bull_mss_bar is not None and (len(df5m)-1 - bull_mss_bar) < MSS_LOOKBACK
     bear_mss_seen = bear_mss_bar is not None and (len(df5m)-1 - bear_mss_bar) < MSS_LOOKBACK
 
-    # 5m FVG
+    # 5m FVG — elke tick is geldig, geen minimale grootte
     bull_fvg = bear_fvg = False
     if bull_mss_bar and bull_mss_bar >= 2:
         for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df5m))):
             bot = df5m["high"].iloc[i-2]; top = df5m["low"].iloc[i]
-            if top > bot and (top-bot)/bot*100 >= FVG_MIN_PCT:
+            if top > bot:
                 bull_fvg = True; break
 
     if bear_mss_bar and bear_mss_bar >= 2:
         for i in range(bear_mss_bar, min(bear_mss_bar+5, len(df5m))):
             top = df5m["low"].iloc[i-2]; bot = df5m["high"].iloc[i]
-            if top > bot and (top-bot)/top*100 >= FVG_MIN_PCT:
+            if top > bot:
                 bear_fvg = True; break
 
     # .618 Fibonacci
@@ -155,7 +154,7 @@ def check_setup(symbol):
     cur_low  = df5m["low"].iloc[-1]
     cur_high = df5m["high"].iloc[-1]
 
-    # Entry condities (zonder VWAP, zonder CVD)
+    # Entry condities
     long_ok = (h1_bull and sellside_seen and second_low_seen and bull_mss_seen and
                bull_fvg and long_fib is not None and
                cur_low <= long_fib <= cur_high)
@@ -248,7 +247,7 @@ def run_bot():
 
 
 if __name__ == "__main__":
-    log.info("ICT Bot SCALP — Kraken Futures | 5m/15m/1H | Min R:R 1:3 | Geen VWAP")
+    log.info("ICT Bot SCALP — Kraken Futures | 5m/15m/1H | Min R:R 1:3 | Tick FVG")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
