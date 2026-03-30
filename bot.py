@@ -3,7 +3,7 @@ ICT Trading Bot - Scalp Edition
 Exchange : Kraken Futures (krakenfutures via CCXT)
 Pairs    : BTC/USD:USD  |  ETH/USD:USD
 Timeframe: 5m entry  |  15m sweeps  |  1H trend
-Strategy : 15m sweep -> 2nd 5m low/high -> MSS -> FVG -> .618 + VWAP
+Strategy : 15m sweep -> 2nd 5m low/high -> MSS -> FVG -> .618
 Risk     : 1% per trade  |  Min R:R 1:3
 Loop     : elke 1 minuut
 """
@@ -59,17 +59,6 @@ def calc_ema(series, n):
     return series.ewm(span=n, adjust=False).mean()
 
 
-def calc_vwap(df):
-    """VWAP berekend vanuit OHLCV candle data — zelfde methode als TradingView"""
-    df = df.copy()
-    df["date"]   = df["ts"].dt.date
-    df["hlc3"]   = (df["high"] + df["low"] + df["close"]) / 3
-    df["tpvol"]  = df["hlc3"] * df["volume"]
-    df["cvol"]   = df.groupby("date")["volume"].transform("cumsum")
-    df["ctpvol"] = df.groupby("date")["tpvol"].transform("cumsum")
-    return df["ctpvol"] / df["cvol"]
-
-
 def pivot_high(series, n):
     res = pd.Series(np.nan, index=series.index)
     for i in range(n, len(series) - n):
@@ -114,10 +103,9 @@ def check_setup(symbol):
     )
     log.info(f"15m sweeps: sellside={sellside_seen} buyside={buyside_seen}")
 
-    # 5m pivots + VWAP
-    df5m["ph"]   = pivot_high(df5m["high"], SWING_LOOKBACK)
-    df5m["pl"]   = pivot_low (df5m["low"],  SWING_LOOKBACK)
-    df5m["vwap"] = calc_vwap(df5m)
+    # 5m pivots
+    df5m["ph"] = pivot_high(df5m["high"], SWING_LOOKBACK)
+    df5m["pl"] = pivot_low (df5m["low"],  SWING_LOOKBACK)
 
     pl_idx = df5m["pl"].dropna().index.tolist()
     ph_idx = df5m["ph"].dropna().index.tolist()
@@ -146,7 +134,7 @@ def check_setup(symbol):
     bull_mss_seen = bull_mss_bar is not None and (len(df5m)-1 - bull_mss_bar) < MSS_LOOKBACK
     bear_mss_seen = bear_mss_bar is not None and (len(df5m)-1 - bear_mss_bar) < MSS_LOOKBACK
 
-    # 5m FVG (displacement)
+    # 5m FVG
     bull_fvg = bear_fvg = False
     if bull_mss_bar and bull_mss_bar >= 2:
         for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df5m))):
@@ -166,20 +154,15 @@ def check_setup(symbol):
 
     cur_low  = df5m["low"].iloc[-1]
     cur_high = df5m["high"].iloc[-1]
-    cur_vwap = df5m["vwap"].iloc[-1]
 
-    # VWAP zones
-    vwap_long_ok  = long_fib  is not None and last_pl <= cur_vwap <= long_fib
-    vwap_short_ok = short_fib is not None and short_fib <= cur_vwap <= last_ph
-
-    # Entry condities — 5m
+    # Entry condities (zonder VWAP, zonder CVD)
     long_ok = (h1_bull and sellside_seen and second_low_seen and bull_mss_seen and
                bull_fvg and long_fib is not None and
-               cur_low <= long_fib <= cur_high and vwap_long_ok)
+               cur_low <= long_fib <= cur_high)
 
     short_ok = (h1_bear and buyside_seen and second_high_seen and bear_mss_seen and
                 bear_fvg and short_fib is not None and
-                cur_low <= short_fib <= cur_high and vwap_short_ok)
+                cur_low <= short_fib <= cur_high)
 
     log.info(f"MSS: bull={bull_mss_seen} bear={bear_mss_seen} | Long={long_ok} | Short={short_ok}")
     if not long_ok and not short_ok:
@@ -265,7 +248,7 @@ def run_bot():
 
 
 if __name__ == "__main__":
-    log.info("ICT Bot SCALP — Kraken Futures | 5m entry / 15m sweeps / 1H trend | Min R:R 1:3")
+    log.info("ICT Bot SCALP — Kraken Futures | 5m/15m/1H | Min R:R 1:3 | Geen VWAP")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
