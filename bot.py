@@ -2,8 +2,8 @@
 ICT Trading Bot - Scalp Edition
 Exchange : Kraken Futures (krakenfutures via CCXT)
 Pairs    : BTC/USD:USD  |  ETH/USD:USD
-Timeframe: 1m candles  |  15m sweeps  |  1H trend
-Strategy : 15m sweep -> 2nd 1m low/high -> MSS -> FVG -> .618 + VWAP
+Timeframe: 5m entry  |  15m sweeps  |  1H trend
+Strategy : 15m sweep -> 2nd 5m low/high -> MSS -> FVG -> .618 + VWAP
 Risk     : 1% per trade  |  Min R:R 1:3
 Loop     : elke 1 minuut
 """
@@ -60,6 +60,7 @@ def calc_ema(series, n):
 
 
 def calc_vwap(df):
+    """VWAP berekend vanuit OHLCV candle data — zelfde methode als TradingView"""
     df = df.copy()
     df["date"]   = df["ts"].dt.date
     df["hlc3"]   = (df["high"] + df["low"] + df["close"]) / 3
@@ -87,10 +88,10 @@ def pivot_low(series, n):
 
 def check_setup(symbol):
     log.info(f"--- Check {symbol} ---")
-    df1m  = fetch_ohlcv(symbol, "1m",  350)
+    df5m  = fetch_ohlcv(symbol, "5m",  350)
     df15m = fetch_ohlcv(symbol, "15m", 100)
     df1h  = fetch_ohlcv(symbol, "1h",  100)
-    if df1m.empty or df15m.empty or df1h.empty:
+    if df5m.empty or df15m.empty or df1h.empty:
         return None
 
     # 1H trend filter
@@ -113,65 +114,65 @@ def check_setup(symbol):
     )
     log.info(f"15m sweeps: sellside={sellside_seen} buyside={buyside_seen}")
 
-    # 1m pivots + VWAP
-    df1m["ph"]   = pivot_high(df1m["high"], SWING_LOOKBACK)
-    df1m["pl"]   = pivot_low (df1m["low"],  SWING_LOOKBACK)
-    df1m["vwap"] = calc_vwap(df1m)
+    # 5m pivots + VWAP
+    df5m["ph"]   = pivot_high(df5m["high"], SWING_LOOKBACK)
+    df5m["pl"]   = pivot_low (df5m["low"],  SWING_LOOKBACK)
+    df5m["vwap"] = calc_vwap(df5m)
 
-    pl_idx = df1m["pl"].dropna().index.tolist()
-    ph_idx = df1m["ph"].dropna().index.tolist()
+    pl_idx = df5m["pl"].dropna().index.tolist()
+    ph_idx = df5m["ph"].dropna().index.tolist()
     if len(pl_idx) < 2 or len(ph_idx) < 2:
         return None
 
-    last_pl = df1m.loc[pl_idx[-1], "pl"]; prev_pl = df1m.loc[pl_idx[-2], "pl"]
-    last_ph = df1m.loc[ph_idx[-1], "ph"]; prev_ph = df1m.loc[ph_idx[-2], "ph"]
+    last_pl = df5m.loc[pl_idx[-1], "pl"]; prev_pl = df5m.loc[pl_idx[-2], "pl"]
+    last_ph = df5m.loc[ph_idx[-1], "ph"]; prev_ph = df5m.loc[ph_idx[-2], "ph"]
     last_pl_bar = pl_idx[-1]; last_ph_bar = ph_idx[-1]
 
-    second_low_seen  = last_pl <= prev_pl * 1.002 and (len(df1m)-1 - last_pl_bar) < SECOND_LOOKBACK
-    second_high_seen = last_ph >= prev_ph * 0.998 and (len(df1m)-1 - last_ph_bar) < SECOND_LOOKBACK
+    second_low_seen  = last_pl <= prev_pl * 1.002 and (len(df5m)-1 - last_pl_bar) < SECOND_LOOKBACK
+    second_high_seen = last_ph >= prev_ph * 0.998 and (len(df5m)-1 - last_ph_bar) < SECOND_LOOKBACK
 
-    # 1m MSS
+    # 5m MSS
     bull_mss_bar = bear_mss_bar = None
     bull_mss_high = bull_mss_low = bear_mss_high = bear_mss_low = None
 
-    for i in range((last_pl_bar if second_low_seen else 0)+1, len(df1m)):
-        if df1m["close"].iloc[i] > last_ph and df1m["close"].iloc[i-1] <= last_ph:
-            bull_mss_bar = i; bull_mss_high = df1m["high"].iloc[i]; bull_mss_low = df1m["low"].iloc[i]
+    for i in range((last_pl_bar if second_low_seen else 0)+1, len(df5m)):
+        if df5m["close"].iloc[i] > last_ph and df5m["close"].iloc[i-1] <= last_ph:
+            bull_mss_bar = i; bull_mss_high = df5m["high"].iloc[i]; bull_mss_low = df5m["low"].iloc[i]
 
-    for i in range((last_ph_bar if second_high_seen else 0)+1, len(df1m)):
-        if df1m["close"].iloc[i] < last_pl and df1m["close"].iloc[i-1] >= last_pl:
-            bear_mss_bar = i; bear_mss_high = df1m["high"].iloc[i]; bear_mss_low = df1m["low"].iloc[i]
+    for i in range((last_ph_bar if second_high_seen else 0)+1, len(df5m)):
+        if df5m["close"].iloc[i] < last_pl and df5m["close"].iloc[i-1] >= last_pl:
+            bear_mss_bar = i; bear_mss_high = df5m["high"].iloc[i]; bear_mss_low = df5m["low"].iloc[i]
 
-    bull_mss_seen = bull_mss_bar is not None and (len(df1m)-1 - bull_mss_bar) < MSS_LOOKBACK
-    bear_mss_seen = bear_mss_bar is not None and (len(df1m)-1 - bear_mss_bar) < MSS_LOOKBACK
+    bull_mss_seen = bull_mss_bar is not None and (len(df5m)-1 - bull_mss_bar) < MSS_LOOKBACK
+    bear_mss_seen = bear_mss_bar is not None and (len(df5m)-1 - bear_mss_bar) < MSS_LOOKBACK
 
-    # 1m FVG
+    # 5m FVG (displacement)
     bull_fvg = bear_fvg = False
     if bull_mss_bar and bull_mss_bar >= 2:
-        for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df1m))):
-            bot = df1m["high"].iloc[i-2]; top = df1m["low"].iloc[i]
+        for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df5m))):
+            bot = df5m["high"].iloc[i-2]; top = df5m["low"].iloc[i]
             if top > bot and (top-bot)/bot*100 >= FVG_MIN_PCT:
                 bull_fvg = True; break
 
     if bear_mss_bar and bear_mss_bar >= 2:
-        for i in range(bear_mss_bar, min(bear_mss_bar+5, len(df1m))):
-            top = df1m["low"].iloc[i-2]; bot = df1m["high"].iloc[i]
+        for i in range(bear_mss_bar, min(bear_mss_bar+5, len(df5m))):
+            top = df5m["low"].iloc[i-2]; bot = df5m["high"].iloc[i]
             if top > bot and (top-bot)/top*100 >= FVG_MIN_PCT:
                 bear_fvg = True; break
 
-    # Fibonacci .618
+    # .618 Fibonacci
     long_fib  = (bull_mss_high-(bull_mss_high-last_pl)*0.618) if bull_mss_seen and bull_mss_high else None
     short_fib = (bear_mss_low+(last_ph-bear_mss_low)*0.618)   if bear_mss_seen and bear_mss_low  else None
 
-    cur_low  = df1m["low"].iloc[-1]
-    cur_high = df1m["high"].iloc[-1]
-    cur_vwap = df1m["vwap"].iloc[-1]
+    cur_low  = df5m["low"].iloc[-1]
+    cur_high = df5m["high"].iloc[-1]
+    cur_vwap = df5m["vwap"].iloc[-1]
 
     # VWAP zones
     vwap_long_ok  = long_fib  is not None and last_pl <= cur_vwap <= long_fib
     vwap_short_ok = short_fib is not None and short_fib <= cur_vwap <= last_ph
 
-    # Entry condities (zonder CVD)
+    # Entry condities — 5m
     long_ok = (h1_bull and sellside_seen and second_low_seen and bull_mss_seen and
                bull_fvg and long_fib is not None and
                cur_low <= long_fib <= cur_high and vwap_long_ok)
@@ -264,7 +265,7 @@ def run_bot():
 
 
 if __name__ == "__main__":
-    log.info("ICT Bot SCALP — Kraken Futures | 1m/15m/1H | Min R:R 1:3 | Geen CVD")
+    log.info("ICT Bot SCALP — Kraken Futures | 5m entry / 15m sweeps / 1H trend | Min R:R 1:3")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
