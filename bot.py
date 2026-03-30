@@ -3,7 +3,7 @@ ICT Trading Bot - Scalp Edition
 Exchange : Kraken Futures (krakenfutures via CCXT)
 Pairs    : BTC/USD:USD  |  ETH/USD:USD
 Timeframe: 1m candles  |  15m sweeps  |  1H trend
-Strategy : 15m sweep -> 2nd 1m low/high -> MSS -> FVG -> .618 + VWAP + CVD divergence
+Strategy : 15m sweep -> 2nd 1m low/high -> MSS -> FVG -> .618 + VWAP
 Risk     : 1% per trade  |  Min R:R 1:3
 Loop     : elke 1 minuut
 """
@@ -35,7 +35,6 @@ H1_EMA_LEN      = 50
 MSS_LOOKBACK    = 20
 SWEEP_LOOKBACK  = 50
 SECOND_LOOKBACK = 30
-CVD_LOOKBACK    = 20
 LOOP_INTERVAL   = 1
 
 exchange = ccxt.krakenfutures({
@@ -61,12 +60,10 @@ def calc_ema(series, n):
 
 
 def calc_vwap(df):
-    """VWAP berekening compatible met Python 3.13 / Pandas 2.x"""
     df = df.copy()
-    df["date"] = df["ts"].dt.date
-    df["hlc3"] = (df["high"] + df["low"] + df["close"]) / 3
-    df["tpvol"] = df["hlc3"] * df["volume"]
-    # Gebruik transform ipv apply om MultiIndex problemen te voorkomen
+    df["date"]   = df["ts"].dt.date
+    df["hlc3"]   = (df["high"] + df["low"] + df["close"]) / 3
+    df["tpvol"]  = df["hlc3"] * df["volume"]
     df["cvol"]   = df.groupby("date")["volume"].transform("cumsum")
     df["ctpvol"] = df.groupby("date")["tpvol"].transform("cumsum")
     return df["ctpvol"] / df["cvol"]
@@ -88,11 +85,6 @@ def pivot_low(series, n):
     return res
 
 
-def calc_cvd(df):
-    delta = np.where(df["close"] >= df["open"], df["volume"], -df["volume"])
-    return pd.Series(delta, index=df.index).cumsum()
-
-
 def check_setup(symbol):
     log.info(f"--- Check {symbol} ---")
     df1m  = fetch_ohlcv(symbol, "1m",  350)
@@ -101,11 +93,13 @@ def check_setup(symbol):
     if df1m.empty or df15m.empty or df1h.empty:
         return None
 
+    # 1H trend filter
     df1h["ema50"] = calc_ema(df1h["close"], H1_EMA_LEN)
     h1_bull = df1h["close"].iloc[-1] > df1h["ema50"].iloc[-1]
     h1_bear = df1h["close"].iloc[-1] < df1h["ema50"].iloc[-1]
     log.info(f"1H: {'BULL' if h1_bull else 'BEAR'} | Close={df1h['close'].iloc[-1]:.2f} EMA50={df1h['ema50'].iloc[-1]:.2f}")
 
+    # 15m sweeps
     lookback = min(SWEEP_LOOKBACK, len(df15m) - 1)
     sellside_seen = any(
         df15m["low"].iloc[i]  <= df15m["low"].iloc[max(0,i-10):i].min() and
@@ -119,10 +113,10 @@ def check_setup(symbol):
     )
     log.info(f"15m sweeps: sellside={sellside_seen} buyside={buyside_seen}")
 
+    # 1m pivots + VWAP
     df1m["ph"]   = pivot_high(df1m["high"], SWING_LOOKBACK)
     df1m["pl"]   = pivot_low (df1m["low"],  SWING_LOOKBACK)
     df1m["vwap"] = calc_vwap(df1m)
-    df1m["cvd"]  = calc_cvd(df1m)
 
     pl_idx = df1m["pl"].dropna().index.tolist()
     ph_idx = df1m["ph"].dropna().index.tolist()
@@ -136,6 +130,7 @@ def check_setup(symbol):
     second_low_seen  = last_pl <= prev_pl * 1.002 and (len(df1m)-1 - last_pl_bar) < SECOND_LOOKBACK
     second_high_seen = last_ph >= prev_ph * 0.998 and (len(df1m)-1 - last_ph_bar) < SECOND_LOOKBACK
 
+    # 1m MSS
     bull_mss_bar = bear_mss_bar = None
     bull_mss_high = bull_mss_low = bear_mss_high = bear_mss_low = None
 
@@ -150,21 +145,21 @@ def check_setup(symbol):
     bull_mss_seen = bull_mss_bar is not None and (len(df1m)-1 - bull_mss_bar) < MSS_LOOKBACK
     bear_mss_seen = bear_mss_bar is not None and (len(df1m)-1 - bear_mss_bar) < MSS_LOOKBACK
 
+    # 1m FVG
     bull_fvg = bear_fvg = False
-    bull_fvg_top = bull_fvg_bot = bear_fvg_top = bear_fvg_bot = None
-
     if bull_mss_bar and bull_mss_bar >= 2:
         for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df1m))):
             bot = df1m["high"].iloc[i-2]; top = df1m["low"].iloc[i]
             if top > bot and (top-bot)/bot*100 >= FVG_MIN_PCT:
-                bull_fvg=True; bull_fvg_top=top; bull_fvg_bot=bot; break
+                bull_fvg = True; break
 
     if bear_mss_bar and bear_mss_bar >= 2:
         for i in range(bear_mss_bar, min(bear_mss_bar+5, len(df1m))):
             top = df1m["low"].iloc[i-2]; bot = df1m["high"].iloc[i]
             if top > bot and (top-bot)/top*100 >= FVG_MIN_PCT:
-                bear_fvg=True; bear_fvg_top=top; bear_fvg_bot=bot; break
+                bear_fvg = True; break
 
+    # Fibonacci .618
     long_fib  = (bull_mss_high-(bull_mss_high-last_pl)*0.618) if bull_mss_seen and bull_mss_high else None
     short_fib = (bear_mss_low+(last_ph-bear_mss_low)*0.618)   if bear_mss_seen and bear_mss_low  else None
 
@@ -172,32 +167,20 @@ def check_setup(symbol):
     cur_high = df1m["high"].iloc[-1]
     cur_vwap = df1m["vwap"].iloc[-1]
 
-    cvd_bull_seen = any(
-        df1m["low"].iloc[i] <= df1m["low"].iloc[max(0,i-CVD_LOOKBACK):i].min()*1.001 and
-        df1m["cvd"].iloc[i]  > df1m["cvd"].iloc[max(0,i-CVD_LOOKBACK):i].min()*1.001 and
-        df1m["cvd"].iloc[i]  < 0
-        for i in range(max(1, len(df1m)-MSS_LOOKBACK), len(df1m))
-    )
-    cvd_bear_seen = any(
-        df1m["high"].iloc[i] >= df1m["high"].iloc[max(0,i-CVD_LOOKBACK):i].max()*0.999 and
-        df1m["cvd"].iloc[i]   < df1m["cvd"].iloc[max(0,i-CVD_LOOKBACK):i].max()*0.999 and
-        df1m["cvd"].iloc[i]   > 0
-        for i in range(max(1, len(df1m)-MSS_LOOKBACK), len(df1m))
-    )
-    log.info(f"MSS: bull={bull_mss_seen} bear={bear_mss_seen} | CVD: bull={cvd_bull_seen} bear={cvd_bear_seen}")
-
+    # VWAP zones
     vwap_long_ok  = long_fib  is not None and last_pl <= cur_vwap <= long_fib
     vwap_short_ok = short_fib is not None and short_fib <= cur_vwap <= last_ph
 
+    # Entry condities (zonder CVD)
     long_ok = (h1_bull and sellside_seen and second_low_seen and bull_mss_seen and
                bull_fvg and long_fib is not None and
-               cur_low <= long_fib <= cur_high and vwap_long_ok and cvd_bull_seen)
+               cur_low <= long_fib <= cur_high and vwap_long_ok)
 
     short_ok = (h1_bear and buyside_seen and second_high_seen and bear_mss_seen and
                 bear_fvg and short_fib is not None and
-                cur_low <= short_fib <= cur_high and vwap_short_ok and cvd_bear_seen)
+                cur_low <= short_fib <= cur_high and vwap_short_ok)
 
-    log.info(f"Long={long_ok} | Short={short_ok}")
+    log.info(f"MSS: bull={bull_mss_seen} bear={bear_mss_seen} | Long={long_ok} | Short={short_ok}")
     if not long_ok and not short_ok:
         return None
 
@@ -281,7 +264,7 @@ def run_bot():
 
 
 if __name__ == "__main__":
-    log.info("ICT Bot SCALP — Kraken Futures | 1m/15m/1H | CVD | Min R:R 1:3")
+    log.info("ICT Bot SCALP — Kraken Futures | 1m/15m/1H | Min R:R 1:3 | Geen CVD")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
