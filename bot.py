@@ -74,6 +74,18 @@ def pivot_low(series, n):
     return res
 
 
+def round_to_tick(price, symbol):
+    """Ronde prijs af op de tick size van het symbool"""
+    try:
+        market = exchange.market(symbol)
+        tick_size = market["precision"]["price"]
+        if tick_size is None or tick_size <= 0:
+            tick_size = 0.5
+    except:
+        tick_size = 0.5
+    return round(round(price / tick_size) * tick_size, 10)
+
+
 def check_setup(symbol):
     log.info(f"--- Check {symbol} ---")
     df5m  = fetch_ohlcv(symbol, "5m",  350)
@@ -133,7 +145,7 @@ def check_setup(symbol):
     bull_mss_seen = bull_mss_bar is not None and (len(df5m)-1 - bull_mss_bar) < MSS_LOOKBACK
     bear_mss_seen = bear_mss_bar is not None and (len(df5m)-1 - bear_mss_bar) < MSS_LOOKBACK
 
-    # 5m FVG — elke tick is geldig, geen minimale grootte
+    # 5m FVG — elke tick is geldig
     bull_fvg = bear_fvg = False
     if bull_mss_bar and bull_mss_bar >= 2:
         for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df5m))):
@@ -168,13 +180,21 @@ def check_setup(symbol):
         return None
 
     if long_ok:
-        entry=long_fib; sl=last_pl*(1-SL_BUFFER_PCT/100)
-        risk=abs(entry-sl); tp=entry+risk*TP_RR
-        rr=(tp-entry)/risk if risk>0 else 0; side="long"
+        entry    = long_fib
+        sl_raw   = last_pl * (1 - SL_BUFFER_PCT / 100)
+        sl       = round_to_tick(sl_raw, symbol)
+        risk     = abs(entry - sl)
+        tp       = entry + risk * TP_RR
+        rr       = (tp - entry) / risk if risk > 0 else 0
+        side     = "long"
     else:
-        entry=short_fib; sl=last_ph*(1+SL_BUFFER_PCT/100)
-        risk=abs(entry-sl); tp=entry-risk*TP_RR
-        rr=(entry-tp)/risk if risk>0 else 0; side="short"
+        entry    = short_fib
+        sl_raw   = last_ph * (1 + SL_BUFFER_PCT / 100)
+        sl       = round_to_tick(sl_raw, symbol)
+        risk     = abs(entry - sl)
+        tp       = entry - risk * TP_RR
+        rr       = (entry - tp) / risk if risk > 0 else 0
+        side     = "short"
 
     if rr < MIN_RR:
         log.info(f"{symbol}: R:R={rr:.2f} < {MIN_RR} — overgeslagen"); return None
@@ -223,8 +243,9 @@ def place_trade(setup):
         log.info(f"Entry {eside} {qty} {sym} | R:R={rr:.2f} | id={o['id']}")
         time.sleep(1)
         exchange.create_order(sym,"stop",xside,qty,sl,params={"reduceOnly":True,"stopPrice":sl})
+        log.info(f"SL={sl:.2f}")
         exchange.create_order(sym,"limit",xside,qty,tp,params={"reduceOnly":True})
-        log.info(f"SL={sl:.2f} TP={tp:.2f}")
+        log.info(f"TP={tp:.2f}")
         with open("trades.json","a") as f:
             f.write(json.dumps({"time":datetime.now(timezone.utc).isoformat(),
                 "sym":sym,"side":side,"entry":entry,"sl":sl,"tp":tp,"qty":qty,"rr":rr})+"\n")
@@ -247,7 +268,7 @@ def run_bot():
 
 
 if __name__ == "__main__":
-    log.info("ICT Bot SCALP — Kraken Futures | 5m/15m/1H | Min R:R 1:3 | Tick FVG")
+    log.info("ICT Bot SCALP — Kraken Futures | 5m/15m/1H | Min R:R 1:3 | Tick SL fix")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
