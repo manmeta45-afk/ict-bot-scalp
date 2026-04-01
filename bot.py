@@ -1,9 +1,10 @@
 """
-ICT Trading Bot - Scalp Edition
+ICT Scalp Bot
 Exchange : Kraken Futures (krakenfutures via CCXT)
 Pairs    : BTC/USD:USD  |  ETH/USD:USD
-Timeframe: 5m entry  |  15m sweeps  |  1H trend
-Strategy : 15m sweep -> 2nd 5m low/high -> MSS -> FVG -> .618
+Trend    : 1H EMA50
+Sweeps   : 15m liquidity sweeps
+Entry    : 5m — 2e lower low/higher high, MSS (wick OF close), FVG, .618 Fibonacci
 Risk     : 1% per trade  |  Min R:R 1:3
 Loop     : elke 1 minuut
 """
@@ -16,222 +17,151 @@ import numpy as np
 import ccxt
 
 load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
 log = logging.getLogger(__name__)
 
-SYMBOLS         = ["BTC/USD:USD", "ETH/USD:USD"]
-RISK_PERCENT    = 1.0
-MIN_RR          = 3.0
-TP_RR           = 3.0
-SL_BUFFER_PCT   = 0.1
-SWING_LOOKBACK  = 10
-H1_EMA_LEN      = 50
-MSS_LOOKBACK    = 20
-SWEEP_LOOKBACK  = 50
-SECOND_LOOKBACK = 30
-LOOP_INTERVAL   = 1
+SYMBOLS=["BTC/USD:USD","ETH/USD:USD"]; RISK_PERCENT=1.0; MIN_RR=3.0; TP_RR=3.0
+SL_BUFFER_PCT=0.1; SWING_LOOKBACK=10; H1_EMA_LEN=50; MSS_LOOKBACK=20
+SWEEP_LOOKBACK=50; SECOND_LOOKBACK=30; LOOP_INTERVAL=1
+TF_TREND="1h"; TF_SWEEP="15m"; TF_ENTRY="5m"
 
 exchange = ccxt.krakenfutures({
-    "apiKey":          os.getenv("KRAKEN_API_KEY"),
-    "secret":          os.getenv("KRAKEN_PRIVATE_KEY"),
+    "apiKey": os.getenv("KRAKEN_API_KEY"),
+    "secret": os.getenv("KRAKEN_PRIVATE_KEY"),
     "enableRateLimit": True,
 })
 
-
-def fetch_ohlcv(symbol, timeframe, limit=350):
+def fetch_ohlcv(symbol, tf, limit=350):
     try:
-        raw = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        raw = exchange.fetch_ohlcv(symbol, tf, limit=limit)
         df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
         return df.sort_values("ts").reset_index(drop=True)
     except Exception as e:
-        log.error(f"fetch_ohlcv ({symbol} {timeframe}): {e}")
-        return pd.DataFrame()
+        log.error(f"fetch_ohlcv ({symbol} {tf}): {e}"); return pd.DataFrame()
 
+def calc_ema(s, n): return s.ewm(span=n, adjust=False).mean()
 
-def calc_ema(series, n):
-    return series.ewm(span=n, adjust=False).mean()
-
-
-def pivot_high(series, n):
-    res = pd.Series(np.nan, index=series.index)
-    for i in range(n, len(series) - n):
-        if series.iloc[i] == series.iloc[i-n:i+n+1].max():
-            res.iloc[i] = series.iloc[i]
+def pivot_high(s, n):
+    res = pd.Series(np.nan, index=s.index)
+    for i in range(n, len(s)-n):
+        if s.iloc[i] == s.iloc[i-n:i+n+1].max(): res.iloc[i] = s.iloc[i]
     return res
 
-
-def pivot_low(series, n):
-    res = pd.Series(np.nan, index=series.index)
-    for i in range(n, len(series) - n):
-        if series.iloc[i] == series.iloc[i-n:i+n+1].min():
-            res.iloc[i] = series.iloc[i]
+def pivot_low(s, n):
+    res = pd.Series(np.nan, index=s.index)
+    for i in range(n, len(s)-n):
+        if s.iloc[i] == s.iloc[i-n:i+n+1].min(): res.iloc[i] = s.iloc[i]
     return res
-
 
 def round_to_tick(price, symbol):
-    """Ronde prijs af op de tick size van het symbool"""
     try:
-        market = exchange.market(symbol)
-        tick_size = market["precision"]["price"]
-        if tick_size is None or tick_size <= 0:
-            tick_size = 0.5
-    except:
-        tick_size = 0.5
-    return round(round(price / tick_size) * tick_size, 10)
-
+        tick = exchange.market(symbol)["precision"]["price"]
+        if not tick or tick <= 0: tick = 0.5
+    except: tick = 0.5
+    return round(round(price / tick) * tick, 10)
 
 def check_setup(symbol):
     log.info(f"--- Check {symbol} ---")
-    df5m  = fetch_ohlcv(symbol, "5m",  350)
-    df15m = fetch_ohlcv(symbol, "15m", 100)
-    df1h  = fetch_ohlcv(symbol, "1h",  100)
-    if df5m.empty or df15m.empty or df1h.empty:
-        return None
+    de = fetch_ohlcv(symbol, TF_ENTRY, 350)
+    ds = fetch_ohlcv(symbol, TF_SWEEP, 100)
+    dt = fetch_ohlcv(symbol, TF_TREND, 100)
+    if de.empty or ds.empty or dt.empty: return None
 
-    # 1H trend filter
-    df1h["ema50"] = calc_ema(df1h["close"], H1_EMA_LEN)
-    h1_bull = df1h["close"].iloc[-1] > df1h["ema50"].iloc[-1]
-    h1_bear = df1h["close"].iloc[-1] < df1h["ema50"].iloc[-1]
-    log.info(f"1H: {'BULL' if h1_bull else 'BEAR'} | Close={df1h['close'].iloc[-1]:.2f} EMA50={df1h['ema50'].iloc[-1]:.2f}")
+    dt["ema50"] = calc_ema(dt["close"], H1_EMA_LEN)
+    h1_bull = dt["close"].iloc[-1] > dt["ema50"].iloc[-1]
+    h1_bear = dt["close"].iloc[-1] < dt["ema50"].iloc[-1]
+    log.info(f"1H: {'BULL' if h1_bull else 'BEAR'} | Close={dt['close'].iloc[-1]:.2f} EMA50={dt['ema50'].iloc[-1]:.2f}")
 
-    # 15m sweeps
-    lookback = min(SWEEP_LOOKBACK, len(df15m) - 1)
-    sellside_seen = any(
-        df15m["low"].iloc[i]  <= df15m["low"].iloc[max(0,i-10):i].min() and
-        df15m["close"].iloc[i] > df15m["low"].iloc[max(0,i-10):i].min()
-        for i in range(max(1, len(df15m) - lookback), len(df15m)) if i > 10
-    )
-    buyside_seen = any(
-        df15m["high"].iloc[i]  >= df15m["high"].iloc[max(0,i-10):i].max() and
-        df15m["close"].iloc[i]  < df15m["high"].iloc[max(0,i-10):i].max()
-        for i in range(max(1, len(df15m) - lookback), len(df15m)) if i > 10
-    )
-    log.info(f"15m sweeps: sellside={sellside_seen} buyside={buyside_seen}")
+    lb = min(SWEEP_LOOKBACK, len(ds)-1)
+    sell_sweep = any(ds["low"].iloc[i] <= ds["low"].iloc[max(0,i-10):i].min() and
+        ds["close"].iloc[i] > ds["low"].iloc[max(0,i-10):i].min()
+        for i in range(max(1,len(ds)-lb), len(ds)) if i > 10)
+    buy_sweep = any(ds["high"].iloc[i] >= ds["high"].iloc[max(0,i-10):i].max() and
+        ds["close"].iloc[i] < ds["high"].iloc[max(0,i-10):i].max()
+        for i in range(max(1,len(ds)-lb), len(ds)) if i > 10)
+    log.info(f"15m sweeps: sellside={sell_sweep} buyside={buy_sweep}")
 
-    # 5m pivots
-    df5m["ph"] = pivot_high(df5m["high"], SWING_LOOKBACK)
-    df5m["pl"] = pivot_low (df5m["low"],  SWING_LOOKBACK)
+    de["ph"] = pivot_high(de["high"], SWING_LOOKBACK)
+    de["pl"] = pivot_low(de["low"], SWING_LOOKBACK)
+    pl_idx = de["pl"].dropna().index.tolist()
+    ph_idx = de["ph"].dropna().index.tolist()
+    if len(pl_idx) < 2 or len(ph_idx) < 2: return None
 
-    pl_idx = df5m["pl"].dropna().index.tolist()
-    ph_idx = df5m["ph"].dropna().index.tolist()
-    if len(pl_idx) < 2 or len(ph_idx) < 2:
-        return None
+    last_pl=de.loc[pl_idx[-1],"pl"]; prev_pl=de.loc[pl_idx[-2],"pl"]
+    last_ph=de.loc[ph_idx[-1],"ph"]; prev_ph=de.loc[ph_idx[-2],"ph"]
+    last_pl_bar=pl_idx[-1]; last_ph_bar=ph_idx[-1]
+    sec_low  = last_pl <= prev_pl*1.002 and (len(de)-1-last_pl_bar) < SECOND_LOOKBACK
+    sec_high = last_ph >= prev_ph*0.998 and (len(de)-1-last_ph_bar) < SECOND_LOOKBACK
 
-    last_pl = df5m.loc[pl_idx[-1], "pl"]; prev_pl = df5m.loc[pl_idx[-2], "pl"]
-    last_ph = df5m.loc[ph_idx[-1], "ph"]; prev_ph = df5m.loc[ph_idx[-2], "ph"]
-    last_pl_bar = pl_idx[-1]; last_ph_bar = ph_idx[-1]
+    # MSS detectie — wick OF candle close door de pivot is geldig
+    bull_bar=bear_bar=None; bull_h=bull_l=bear_h=bear_l=None
+    for i in range((last_pl_bar if sec_low else 0)+1, len(de)):
+        # Long MSS: wick of close boven laatste pivot high
+        if de["high"].iloc[i] > last_ph or de["close"].iloc[i] > last_ph:
+            bull_bar=i; bull_h=de["high"].iloc[i]; bull_l=de["low"].iloc[i]; break
 
-    second_low_seen  = last_pl <= prev_pl * 1.002 and (len(df5m)-1 - last_pl_bar) < SECOND_LOOKBACK
-    second_high_seen = last_ph >= prev_ph * 0.998 and (len(df5m)-1 - last_ph_bar) < SECOND_LOOKBACK
+    for i in range((last_ph_bar if sec_high else 0)+1, len(de)):
+        # Short MSS: wick of close onder laatste pivot low
+        if de["low"].iloc[i] < last_pl or de["close"].iloc[i] < last_pl:
+            bear_bar=i; bear_h=de["high"].iloc[i]; bear_l=de["low"].iloc[i]; break
 
-    # 5m MSS
-    bull_mss_bar = bear_mss_bar = None
-    bull_mss_high = bull_mss_low = bear_mss_high = bear_mss_low = None
+    bull_mss = bull_bar is not None and (len(de)-1-bull_bar) < MSS_LOOKBACK
+    bear_mss = bear_bar is not None and (len(de)-1-bear_bar) < MSS_LOOKBACK
 
-    for i in range((last_pl_bar if second_low_seen else 0)+1, len(df5m)):
-        if df5m["close"].iloc[i] > last_ph and df5m["close"].iloc[i-1] <= last_ph:
-            bull_mss_bar = i; bull_mss_high = df5m["high"].iloc[i]; bull_mss_low = df5m["low"].iloc[i]
+    # FVG — elke tick geldig
+    bull_fvg=bear_fvg=False
+    if bull_bar and bull_bar >= 2:
+        for i in range(bull_bar, min(bull_bar+5,len(de))):
+            if de["low"].iloc[i] > de["high"].iloc[i-2]: bull_fvg=True; break
+    if bear_bar and bear_bar >= 2:
+        for i in range(bear_bar, min(bear_bar+5,len(de))):
+            if de["low"].iloc[i-2] > de["high"].iloc[i]: bear_fvg=True; break
 
-    for i in range((last_ph_bar if second_high_seen else 0)+1, len(df5m)):
-        if df5m["close"].iloc[i] < last_pl and df5m["close"].iloc[i-1] >= last_pl:
-            bear_mss_bar = i; bear_mss_high = df5m["high"].iloc[i]; bear_mss_low = df5m["low"].iloc[i]
+    long_fib  = (bull_h-(bull_h-last_pl)*0.618) if bull_mss and bull_h else None
+    short_fib = (bear_l+(last_ph-bear_l)*0.618)  if bear_mss and bear_l else None
+    cur_lo=de["low"].iloc[-1]; cur_hi=de["high"].iloc[-1]
 
-    bull_mss_seen = bull_mss_bar is not None and (len(df5m)-1 - bull_mss_bar) < MSS_LOOKBACK
-    bear_mss_seen = bear_mss_bar is not None and (len(df5m)-1 - bear_mss_bar) < MSS_LOOKBACK
-
-    # 5m FVG — elke tick is geldig
-    bull_fvg = bear_fvg = False
-    if bull_mss_bar and bull_mss_bar >= 2:
-        for i in range(bull_mss_bar, min(bull_mss_bar+5, len(df5m))):
-            bot = df5m["high"].iloc[i-2]; top = df5m["low"].iloc[i]
-            if top > bot:
-                bull_fvg = True; break
-
-    if bear_mss_bar and bear_mss_bar >= 2:
-        for i in range(bear_mss_bar, min(bear_mss_bar+5, len(df5m))):
-            top = df5m["low"].iloc[i-2]; bot = df5m["high"].iloc[i]
-            if top > bot:
-                bear_fvg = True; break
-
-    # .618 Fibonacci
-    long_fib  = (bull_mss_high-(bull_mss_high-last_pl)*0.618) if bull_mss_seen and bull_mss_high else None
-    short_fib = (bear_mss_low+(last_ph-bear_mss_low)*0.618)   if bear_mss_seen and bear_mss_low  else None
-
-    cur_low  = df5m["low"].iloc[-1]
-    cur_high = df5m["high"].iloc[-1]
-
-    # Entry condities
-    long_ok = (h1_bull and sellside_seen and second_low_seen and bull_mss_seen and
-               bull_fvg and long_fib is not None and
-               cur_low <= long_fib <= cur_high)
-
-    short_ok = (h1_bear and buyside_seen and second_high_seen and bear_mss_seen and
-                bear_fvg and short_fib is not None and
-                cur_low <= short_fib <= cur_high)
-
-    log.info(f"MSS: bull={bull_mss_seen} bear={bear_mss_seen} | Long={long_ok} | Short={short_ok}")
-    if not long_ok and not short_ok:
-        return None
+    long_ok  = h1_bull and sell_sweep and sec_low  and bull_mss and bull_fvg and long_fib  is not None and cur_lo <= long_fib  <= cur_hi
+    short_ok = h1_bear and buy_sweep  and sec_high and bear_mss and bear_fvg and short_fib is not None and cur_lo <= short_fib <= cur_hi
+    log.info(f"MSS: bull={bull_mss} bear={bear_mss} | Long={long_ok} | Short={short_ok}")
+    if not long_ok and not short_ok: return None
 
     if long_ok:
-        entry    = long_fib
-        sl_raw   = last_pl * (1 - SL_BUFFER_PCT / 100)
-        sl       = round_to_tick(sl_raw, symbol)
-        risk     = abs(entry - sl)
-        tp       = entry + risk * TP_RR
-        rr       = (tp - entry) / risk if risk > 0 else 0
-        side     = "long"
+        entry=long_fib; sl=round_to_tick(last_pl*(1-SL_BUFFER_PCT/100),symbol)
+        risk=abs(entry-sl); tp=entry+risk*TP_RR; rr=(tp-entry)/risk if risk>0 else 0; side="long"
     else:
-        entry    = short_fib
-        sl_raw   = last_ph * (1 + SL_BUFFER_PCT / 100)
-        sl       = round_to_tick(sl_raw, symbol)
-        risk     = abs(entry - sl)
-        tp       = entry - risk * TP_RR
-        rr       = (entry - tp) / risk if risk > 0 else 0
-        side     = "short"
+        entry=short_fib; sl=round_to_tick(last_ph*(1+SL_BUFFER_PCT/100),symbol)
+        risk=abs(entry-sl); tp=entry-risk*TP_RR; rr=(entry-tp)/risk if risk>0 else 0; side="short"
 
-    if rr < MIN_RR:
-        log.info(f"{symbol}: R:R={rr:.2f} < {MIN_RR} — overgeslagen"); return None
-
+    if rr < MIN_RR: log.info(f"{symbol}: R:R={rr:.2f} < {MIN_RR} — overgeslagen"); return None
     log.info(f"SETUP {side.upper()}: entry={entry:.2f} sl={sl:.2f} tp={tp:.2f} R:R={rr:.2f}")
     return {"side":side,"entry":entry,"sl":sl,"tp":tp,"symbol":symbol,"rr":rr}
 
-
 def get_balance():
     try:
-        bal   = exchange.fetch_balance()
-        usd   = float(bal.get("USD",  {}).get("free", 0) or 0)
-        eur   = float(bal.get("EUR",  {}).get("free", 0) or 0)
-        flex  = float(bal.get("FLEX", {}).get("free", 0) or 0)
-        total = usd + eur + flex
+        bal=exchange.fetch_balance()
+        usd=float(bal.get("USD",{}).get("free",0) or 0)
+        eur=float(bal.get("EUR",{}).get("free",0) or 0)
+        flex=float(bal.get("FLEX",{}).get("free",0) or 0)
+        total=usd+eur+flex
         log.info(f"Saldo: USD={usd:.2f} EUR={eur:.2f} FLEX={flex:.2f} | Totaal={total:.2f}")
         return total
-    except Exception as e:
-        log.error(f"Balance fout ({type(e).__name__}): {e}"); return 0.0
-
+    except Exception as e: log.error(f"Balance fout: {e}"); return 0.0
 
 def has_position(symbol):
-    try:
-        return any(float(p.get("contracts") or 0)!=0 for p in exchange.fetch_positions([symbol]))
+    try: return any(float(p.get("contracts") or 0)!=0 for p in exchange.fetch_positions([symbol]))
     except: return False
-
 
 def place_trade(setup):
     sym=setup["symbol"]; side=setup["side"]
     entry=setup["entry"]; sl=setup["sl"]; tp=setup["tp"]; rr=setup["rr"]
-    if has_position(sym):
-        log.info(f"{sym}: al open positie"); return
-    balance = get_balance()
+    if has_position(sym): log.info(f"{sym}: al open positie"); return
+    balance=get_balance()
     if balance <= 0: log.error("Geen saldo"); return
     try:
-        risk=balance*(RISK_PERCENT/100)
-        dist=abs(entry-sl)
+        risk=balance*(RISK_PERCENT/100); dist=abs(entry-sl)
         if dist==0: log.error("SL=0"); return
         qty=float(exchange.amount_to_precision(sym, risk/dist))
         if qty<=0: log.error("qty=0"); return
@@ -253,22 +183,19 @@ def place_trade(setup):
     except ccxt.InsufficientFunds: log.error("Onvoldoende saldo")
     except ccxt.BaseError as e: log.error(f"Exchange fout: {e}")
 
-
 def run_bot():
     log.info(f"=== Run {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} ===")
     get_balance()
     for sym in SYMBOLS:
         try:
-            s = check_setup(sym)
+            s=check_setup(sym)
             if s: place_trade(s)
             else: log.info(f"{sym}: geen setup")
-        except Exception as e:
-            log.error(f"{sym} fout: {e}", exc_info=True)
+        except Exception as e: log.error(f"{sym} fout: {e}", exc_info=True)
     log.info("=== Klaar ===\n")
 
-
 if __name__ == "__main__":
-    log.info("ICT Bot SCALP — Kraken Futures | 5m/15m/1H | Min R:R 1:3 | Tick SL fix")
+    log.info("ICT Scalp Bot | 1H/15m/5m | MSS wick+close | Min R:R 1:3")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
