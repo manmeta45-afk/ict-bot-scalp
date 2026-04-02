@@ -62,6 +62,18 @@ def round_to_tick(price, symbol):
     except: tick = 0.5
     return round(round(price / tick) * tick, 10)
 
+def has_position(symbol):
+    try:
+        positions = exchange.fetch_positions([symbol])
+        for p in positions:
+            contracts = float(p.get("contracts") or 0)
+            if contracts != 0:
+                log.info(f"{symbol}: open positie gevonden ({contracts} contracts) — trade overgeslagen")
+                return True
+        return False
+    except Exception as e:
+        log.error(f"has_position fout: {e}"); return False
+
 def check_setup(symbol):
     log.info(f"--- Check {symbol} ---")
     de = fetch_ohlcv(symbol, TF_ENTRY, 350)
@@ -98,19 +110,15 @@ def check_setup(symbol):
     # MSS detectie — wick OF candle close door de pivot is geldig
     bull_bar=bear_bar=None; bull_h=bull_l=bear_h=bear_l=None
     for i in range((last_pl_bar if sec_low else 0)+1, len(de)):
-        # Long MSS: wick of close boven laatste pivot high
         if de["high"].iloc[i] > last_ph or de["close"].iloc[i] > last_ph:
             bull_bar=i; bull_h=de["high"].iloc[i]; bull_l=de["low"].iloc[i]; break
-
     for i in range((last_ph_bar if sec_high else 0)+1, len(de)):
-        # Short MSS: wick of close onder laatste pivot low
         if de["low"].iloc[i] < last_pl or de["close"].iloc[i] < last_pl:
             bear_bar=i; bear_h=de["high"].iloc[i]; bear_l=de["low"].iloc[i]; break
 
     bull_mss = bull_bar is not None and (len(de)-1-bull_bar) < MSS_LOOKBACK
     bear_mss = bear_bar is not None and (len(de)-1-bear_bar) < MSS_LOOKBACK
 
-    # FVG — elke tick geldig
     bull_fvg=bear_fvg=False
     if bull_bar and bull_bar >= 2:
         for i in range(bull_bar, min(bull_bar+5,len(de))):
@@ -150,14 +158,11 @@ def get_balance():
         return total
     except Exception as e: log.error(f"Balance fout: {e}"); return 0.0
 
-def has_position(symbol):
-    try: return any(float(p.get("contracts") or 0)!=0 for p in exchange.fetch_positions([symbol]))
-    except: return False
-
 def place_trade(setup):
     sym=setup["symbol"]; side=setup["side"]
     entry=setup["entry"]; sl=setup["sl"]; tp=setup["tp"]; rr=setup["rr"]
-    if has_position(sym): log.info(f"{sym}: al open positie"); return
+    # Check open positie DIRECT voor trade plaatsing
+    if has_position(sym): return
     balance=get_balance()
     if balance <= 0: log.error("Geen saldo"); return
     try:
@@ -188,6 +193,9 @@ def run_bot():
     get_balance()
     for sym in SYMBOLS:
         try:
+            # Check positie VOOR setup detectie — skip direct als er al een positie is
+            if has_position(sym):
+                continue
             s=check_setup(sym)
             if s: place_trade(s)
             else: log.info(f"{sym}: geen setup")
