@@ -7,6 +7,7 @@ Sweeps   : 15m liquidity sweeps
 Entry    : 5m — 2e lower low/higher high, MSS (wick OF close), FVG, .618 Fibonacci
 Risk     : 1% per trade  |  Min R:R 1:3
 Loop     : elke 1 minuut
+Data     : persistent opgeslagen in /app/data/
 """
 
 import os, time, json, logging, schedule
@@ -17,8 +18,15 @@ import numpy as np
 import ccxt
 
 load_dotenv()
+
+DATA_DIR = "/app/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
+    handlers=[
+        logging.FileHandler(f"{DATA_DIR}/bot.log"),
+        logging.StreamHandler()
+    ])
 log = logging.getLogger(__name__)
 
 SYMBOLS=["BTC/USD:USD","ETH/USD:USD"]; RISK_PERCENT=1.0; MIN_RR=3.0; TP_RR=3.0
@@ -107,7 +115,6 @@ def check_setup(symbol):
     sec_low  = last_pl <= prev_pl*1.002 and (len(de)-1-last_pl_bar) < SECOND_LOOKBACK
     sec_high = last_ph >= prev_ph*0.998 and (len(de)-1-last_ph_bar) < SECOND_LOOKBACK
 
-    # MSS detectie — wick OF candle close door de pivot is geldig
     bull_bar=bear_bar=None; bull_h=bull_l=bear_h=bear_l=None
     for i in range((last_pl_bar if sec_low else 0)+1, len(de)):
         if de["high"].iloc[i] > last_ph or de["close"].iloc[i] > last_ph:
@@ -161,7 +168,6 @@ def get_balance():
 def place_trade(setup):
     sym=setup["symbol"]; side=setup["side"]
     entry=setup["entry"]; sl=setup["sl"]; tp=setup["tp"]; rr=setup["rr"]
-    # Check open positie DIRECT voor trade plaatsing
     if has_position(sym): return
     balance=get_balance()
     if balance <= 0: log.error("Geen saldo"); return
@@ -181,7 +187,7 @@ def place_trade(setup):
         log.info(f"SL={sl:.2f}")
         exchange.create_order(sym,"limit",xside,qty,tp,params={"reduceOnly":True})
         log.info(f"TP={tp:.2f}")
-        with open("trades.json","a") as f:
+        with open(f"{DATA_DIR}/trades.json","a") as f:
             f.write(json.dumps({"time":datetime.now(timezone.utc).isoformat(),
                 "sym":sym,"side":side,"entry":entry,"sl":sl,"tp":tp,"qty":qty,"rr":rr})+"\n")
         log.info("Trade geplaatst!")
@@ -193,9 +199,7 @@ def run_bot():
     get_balance()
     for sym in SYMBOLS:
         try:
-            # Check positie VOOR setup detectie — skip direct als er al een positie is
-            if has_position(sym):
-                continue
+            if has_position(sym): continue
             s=check_setup(sym)
             if s: place_trade(s)
             else: log.info(f"{sym}: geen setup")
@@ -203,7 +207,7 @@ def run_bot():
     log.info("=== Klaar ===\n")
 
 if __name__ == "__main__":
-    log.info("ICT Scalp Bot | 1H/15m/5m | MSS wick+close | Min R:R 1:3")
+    log.info("ICT Scalp Bot | 1H/15m/5m | Geen CVD | MSS wick+close | Min R:R 1:3 | Persistent logs")
     run_bot()
     schedule.every(LOOP_INTERVAL).minutes.do(run_bot)
     while True:
